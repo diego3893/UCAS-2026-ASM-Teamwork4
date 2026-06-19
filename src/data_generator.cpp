@@ -12,7 +12,7 @@
 #include<ctime>
 using namespace std;
 
-#define N 100
+#define N 4096
 
 int main(){
     srand((unsigned int)time(NULL));
