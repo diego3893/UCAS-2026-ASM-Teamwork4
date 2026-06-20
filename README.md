@@ -51,8 +51,7 @@ UCAS-2026-ASM-Teamwork4/
 │   ├── matrix_multiply_simd.c       # C SIMD 驱动 → simd_dot
 │   ├── simd_dot.s                   # 汇编核心：AVX2 向量点积（vpmulld+vpaddd）
 │   ├── matrix_multiply_other.c      # C OpenMP 驱动 → simd_dot（多线程）
-│   ├── unroll_dot.s                 # 汇编核心：8× 循环展开点积（备用）
-│   └── data_generator.cpp           # (旧) 文本格式生成器
+│   └── unroll_dot.s                 # 汇编核心：8× 循环展开点积（备用）
 ├── tests/                           # 测试数据目录（.bin 文件由 generate 生成）
 ├── docs/
 │   └── report.tex                   # 实验报告
