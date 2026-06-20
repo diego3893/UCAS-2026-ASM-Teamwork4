@@ -1,115 +1,75 @@
-﻿#include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-
+#define N 4096
 #define BS 64
 
-void matrix_multiply(int, int**, int**, int**);
-int** allocate_matrix(int);
+extern void block_kernel(int *A, int *B, int *C,
+                         int i, int jj, int kk, int k_end);
+int* flat_alloc(void);
+void flat_free(int *m);
 
-int main(){
-    const char *filename = "../test/matrix_input.txt";
-    FILE *file = fopen(filename, "r");
-    if(!file){
-        printf("错误：无法打开文件 %s\n", filename);
-        return -1;
-    }
-    int N;
-    if(fscanf(file, "%d", &N) != 1){
-        printf("错误：无法读取矩阵规模 N\n");
-        fclose(file);
-        return -1;
-    }
-    printf("成功读取矩阵规模 N = %d\n", N);
+int main()
+{
+    const char *fileA = "tests/matrixA.bin";
+    const char *fileB = "tests/matrixB.bin";
+    const char *fileC = "tests/output_C.bin";
 
-    int **matrixA = allocate_matrix(N);
-    int **matrixB = allocate_matrix(N);
-    int **matrixC = allocate_matrix(N);
-    if(!matrixA || !matrixB || !matrixC){
-        printf("错误：内存分配失败！\n");
-        fclose(file);
+    FILE *fpA = fopen(fileA, "rb");
+    FILE *fpB = fopen(fileB, "rb");
+    if (!fpA || !fpB) {
+        perror("Input file open failed — run generate first.");
         return -1;
     }
 
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
-            if(fscanf(file, "%d", &matrixA[i][j]) != 1){
-                printf("错误：读取矩阵 A 数据时出错 (行:%d, 列:%d)\n", i, j);
-                fclose(file);
-                return -1;
-            }
-        }
-    }
-    printf("矩阵 A 读入完毕。\n");
+    int *A = flat_alloc();
+    int *B = flat_alloc();
+    int *C = flat_alloc();
+    if (!A || !B || !C) { perror("Allocate failed."); return -1; }
 
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
-            if(fscanf(file, "%d", &matrixB[i][j]) != 1){
-                printf("错误：读取矩阵 B 数据时出错 (行:%d, 列:%d)\n", i, j);
-                fclose(file);
-                return -1;
-            }
-        }
-    }
-    printf("矩阵 B 读入完毕。\n");
-    fclose(file);
+    fread(A, sizeof(int), (size_t)N * N, fpA);
+    fread(B, sizeof(int), (size_t)N * N, fpB);
+    fclose(fpA);
+    fclose(fpB);
 
+    printf("Start (block, BS=%d, asm kernel, flat) ...\n", BS);
 
-    printf("开始执行（分块优化，块大小 = %d）\n", BS);
-    clock_t start = clock();
-    
-    matrix_multiply(N, matrixA, matrixB, matrixC);
-    
-    clock_t end = clock();
-    double cpu_time_used = ((double)(end-start))/CLOCKS_PER_SEC;
-    printf("计算完成！\n");
-    printf("-> 函数执行时间: %f 秒\n", cpu_time_used);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    printf("\n验证结果（前4x4）：\n");
-    for(int i=0; i<4 && i<N; ++i){
-        for(int j=0; j<4 && j<N; ++j){
-            printf("%d ", matrixC[i][j]);
-        }
-        printf("\n");
-    }
-
-    return 0;
-}
-
-void matrix_multiply(int N, int **matrixA, int **matrixB, int **matrixC){
-    int ii, jj, kk;
-    int i, j, k;
-    
-    for(ii = 0; ii < N; ii += BS){
-        for(jj = 0; jj < N; jj += BS){
-            for(kk = 0; kk < N; kk += BS){
-                int i_end = (ii + BS < N) ? ii + BS : N;
-                int j_end = (jj + BS < N) ? jj + BS : N;
+    for (int ii = 0; ii < N; ii += BS) {
+        for (int jj = 0; jj < N; jj += BS) {
+            for (int kk = 0; kk < N; kk += BS) {
                 int k_end = (kk + BS < N) ? kk + BS : N;
-                
-                for(i = ii; i < i_end; ++i){
-                    for(j = jj; j < j_end; ++j){
-                        for(k = kk; k < k_end; ++k){
-                            matrixC[i][j] += matrixA[i][k] * matrixB[k][j];
-                        }
-                    }
+                for (int i = ii; i < ii + BS && i < N; i++) {
+                    block_kernel(A, B, C, i, jj, kk, k_end);
                 }
             }
         }
+        if ((ii + BS) % 256 == 0)
+            printf("  ii=%d done\n", ii + BS);
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double t = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    printf("Time: %.2f s\n", t);
+
+    FILE *fpC = fopen(fileC, "wb");
+    if (!fpC) { perror("Output file open failed."); return -1; }
+    fwrite(C, sizeof(int), (size_t)N * N, fpC);
+    fclose(fpC);
+    printf("Output successfully.\n");
+
+    flat_free(A); flat_free(B); flat_free(C);
+    return 0;
 }
 
-int** allocate_matrix(int N){
-    int** matrix = (int**)malloc(N*sizeof(int*));
-    if(!matrix){
-        return NULL;
-    }
-    int* block = (int*)calloc(N*N, sizeof(int));
-    if(!block){
-        return NULL;
-    }
-    for(int i=0; i<N; ++i){
-        matrix[i] = block+i*N;
-    }
-    return matrix;
+int* flat_alloc(void)
+{
+    return (int *)calloc((size_t)N * N, sizeof(int));
+}
+
+void flat_free(int *m)
+{
+    free(m);
 }

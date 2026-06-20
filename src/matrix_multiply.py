@@ -1,30 +1,55 @@
+import struct
 import time
-import random
+import sys
 
-def matrixmultiply(N, matrixA, matrixB, matrixC):
-    for i in range(N):
-        for j in range(N):
-            for k in range(N):
-                matrixC[i][j] += matrixA[i][k] * matrixB[k][j]
+N = 4096
 
 def main():
-    N = 128  # 4096跑py的三重循环慢的要死，先用小数据
-    
-    print(f"正在生成大小为 {N}x{N} 的矩阵...")
-    matrixA = [[random.randint(0, 10) for _ in range(N)] for _ in range(N)]
-    matrixB = [[random.randint(0, 10) for _ in range(N)] for _ in range(N)]
-    matrixC = [[0 for _ in range(N)] for _ in range(N)]
+    fileA = "../tests/matrixA.bin"
+    fileB = "../tests/matrixB.bin"
+    fileC = "../tests/output_C.bin"
 
-    print("开始执行")
-    start_time = time.time()
-    
-    matrixmultiply(N, matrixA, matrixB, matrixC)
-    
-    end_time = time.time()
-    execution_time = end_time - start_time
-    
-    print("计算完成！")
-    print(f"-> 函数执行时间: {execution_time:.4f} 秒")
+    # ---------- read ----------
+    A = []
+    with open(fileA, "rb") as f:
+        for _ in range(N):
+            row = list(struct.unpack(f"{N}i", f.read(N * 4)))
+            A.append(row)
+
+    B = []
+    with open(fileB, "rb") as f:
+        for _ in range(N):
+            row = list(struct.unpack(f"{N}i", f.read(N * 4)))
+            B.append(row)
+
+    C = [[0] * N for _ in range(N)]
+
+    print("Start computing ...")
+
+    start = time.time()
+
+    for i in range(N):
+        for k in range(N):
+            aik = A[i][k]
+            if aik == 0:
+                continue
+            rowB = B[k]
+            rowC = C[i]
+            for j in range(N):
+                rowC[j] += aik * rowB[j]
+
+        if (i + 1) % 256 == 0:
+            print(f"  row {i + 1}/{N} done")
+
+    elapsed = time.time() - start
+    print(f"Time: {elapsed:.2f} s")
+
+    # ---------- write ----------
+    with open(fileC, "wb") as f:
+        for row in C:
+            f.write(struct.pack(f"{N}i", *row))
+
+    print("Output successfully.")
 
 if __name__ == "__main__":
     main()

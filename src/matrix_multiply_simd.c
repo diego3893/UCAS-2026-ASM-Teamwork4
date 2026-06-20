@@ -1,138 +1,91 @@
-﻿#include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <immintrin.h>
+#define N 4096
 
-void matrix_multiply(int, int**, int**, int**);
-int** allocate_matrix(int);
-void transpose_matrix(int, int**, int**);
+extern int simd_dot(int *A_row, int *BT_row, int len);
+int** allocate_matrix(void);
+void  free_matrix(int **m);
+void  transpose_matrix(int **src, int **dst);
 
-int main(){
-    const char *filename = "../test/matrix_input.txt";
-    FILE *file = fopen(filename, "r");
-    if(!file){
-        printf("错误：无法打开文件 %s\n", filename);
-        return -1;
-    }
-    int N;
-    if(fscanf(file, "%d", &N) != 1){
-        printf("错误：无法读取矩阵规模 N\n");
-        fclose(file);
-        return -1;
-    }
-    printf("成功读取矩阵规模 N = %d\n", N);
+int main()
+{
+    const char *fileA = "tests/matrixA.bin";
+    const char *fileB = "tests/matrixB.bin";
+    const char *fileC = "tests/output_C.bin";
 
-    int **matrixA = allocate_matrix(N);
-    int **matrixB = allocate_matrix(N);
-    int **matrixBT = allocate_matrix(N);
-    int **matrixC = allocate_matrix(N);
-    if(!matrixA || !matrixB || !matrixBT || !matrixC){
-        printf("错误：内存分配失败！\n");
-        fclose(file);
+    FILE *fpA = fopen(fileA, "rb");
+    FILE *fpB = fopen(fileB, "rb");
+    if (!fpA || !fpB) {
+        perror("Input file open failed — run generate first.");
         return -1;
     }
 
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
-            if(fscanf(file, "%d", &matrixA[i][j]) != 1){
-                printf("错误：读取矩阵 A 数据时出错 (行:%d, 列:%d)\n", i, j);
-                fclose(file);
-                return -1;
-            }
-        }
+    int **A = allocate_matrix();
+    int **B = allocate_matrix();
+    int **C = allocate_matrix();
+    if (!A || !B || !C) { perror("Allocate failed."); return -1; }
+
+    for (int i = 0; i < N; i++) {
+        fread(A[i], sizeof(int), N, fpA);
+        fread(B[i], sizeof(int), N, fpB);
     }
-    printf("矩阵 A 读入完毕。\n");
+    fclose(fpA);
+    fclose(fpB);
 
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
-            if(fscanf(file, "%d", &matrixB[i][j]) != 1){
-                printf("错误：读取矩阵 B 数据时出错 (行:%d, 列:%d)\n", i, j);
-                fclose(file);
-                return -1;
-            }
-        }
-    }
-    printf("矩阵 B 读入完毕。\n");
-    fclose(file);
+    printf("Start (SIMD AVX2, asm dot) ...\n");
 
-
-    printf("开始执行（SIMD AVX2优化，含转置）\n");
     clock_t start = clock();
-    
-    matrix_multiply(N, matrixA, matrixB, matrixC);
-    
-    clock_t end = clock();
-    double cpu_time_used = ((double)(end-start))/CLOCKS_PER_SEC;
-    printf("计算完成！\n");
-    printf("-> 函数执行时间: %f 秒\n", cpu_time_used);
 
-    printf("\n验证结果（前4x4）：\n");
-    for(int i=0; i<4 && i<N; ++i){
-        for(int j=0; j<4 && j<N; ++j){
-            printf("%d ", matrixC[i][j]);
+    /* transpose B to BT */
+    int **BT = allocate_matrix();
+    transpose_matrix(B, BT);
+
+    /* for each row i, for each row j of BT, simd_dot */
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            C[i][j] = simd_dot(A[i], BT[j], N);
         }
-        printf("\n");
+        if ((i + 1) % 256 == 0)
+            printf("  row %d/%d done\n", i + 1, N);
     }
 
+    free_matrix(BT);
+
+    clock_t end   = clock();
+    double t = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Time: %.2f s\n", t);
+
+    FILE *fpC = fopen(fileC, "wb");
+    if (!fpC) { perror("Output file open failed."); return -1; }
+    for (int i = 0; i < N; i++)
+        fwrite(C[i], sizeof(int), N, fpC);
+    fclose(fpC);
+    printf("Output successfully.\n");
+
+    free_matrix(A); free_matrix(B); free_matrix(C);
     return 0;
 }
 
-void transpose_matrix(int N, int **src, int **dst){
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
+void transpose_matrix(int **src, int **dst)
+{
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
             dst[j][i] = src[i][j];
-        }
-    }
 }
 
-void matrix_multiply(int N, int **matrixA, int **matrixB, int **matrixC){
-    int **matrixBT = allocate_matrix(N);
-    if(!matrixBT) return;
-    
-    transpose_matrix(N, matrixB, matrixBT);
-
-    int block_size = 8;
-    int k;
-    
-    for(int i=0; i<N; ++i){
-        for(int j=0; j<N; ++j){
-            __m256i sum = _mm256_setzero_si256();
-            k = 0;
-            
-            for(; k <= N - block_size; k += block_size){
-                __m256i a = _mm256_loadu_si256((__m256i*)&matrixA[i][k]);
-                __m256i b = _mm256_loadu_si256((__m256i*)&matrixBT[j][k]);
-                __m256i mul = _mm256_mullo_epi32(a, b);
-                sum = _mm256_add_epi32(sum, mul);
-            }
-            
-            int result = 0;
-            int temp[8];
-            _mm256_storeu_si256((__m256i*)temp, sum);
-            for(int t=0; t<8; ++t){
-                result += temp[t];
-            }
-            
-            for(; k < N; ++k){
-                result += matrixA[i][k] * matrixBT[j][k];
-            }
-            
-            matrixC[i][j] = result;
-        }
-    }
+int** allocate_matrix(void)
+{
+    int **m = (int **)malloc(N * sizeof(int *));
+    if (!m) return NULL;
+    int *block = (int *)calloc((size_t)N * N, sizeof(int));
+    if (!block) { free(m); return NULL; }
+    for (int i = 0; i < N; i++) m[i] = block + i * N;
+    return m;
 }
 
-int** allocate_matrix(int N){
-    int** matrix = (int**)malloc(N*sizeof(int*));
-    if(!matrix){
-        return NULL;
-    }
-    int* block = (int*)calloc(N*N, sizeof(int));
-    if(!block){
-        return NULL;
-    }
-    for(int i=0; i<N; ++i){
-        matrix[i] = block+i*N;
-    }
-    return matrix;
+void free_matrix(int **m)
+{
+    if (m) free(m[0]);
+    free(m);
 }

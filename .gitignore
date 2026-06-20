@@ -1,2 +1,5 @@
 TeamMember.md
 *.exe
+bin/
+tests/*.bin
+/CLAUDE.md

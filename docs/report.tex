@@ -1,0 +1,171 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper]{geometry}
+\geometry{left=2.0cm,right=2.0cm,top=2.5cm,bottom=2.5cm}
+
+\usepackage{ctex}
+\usepackage{amsmath,amsfonts,graphicx,amssymb,bm,amsthm}
+\usepackage{algorithm,algorithmicx}
+\usepackage[noend]{algpseudocode}
+\usepackage{fancyhdr}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{url}
+
+\newlist{problem}{enumerate}{1}
+\setlist[problem]{
+    label={},
+    leftmargin=4em,
+    align=left,
+    labelsep=2em,
+}
+
+% 段落间距
+\setlength{\parskip}{1em}
+\allowdisplaybreaks
+
+\pagestyle{fancy}
+\lhead{\kaishu 中国科学院大学}
+\chead{}
+\rhead{\kaishu 2026年春季学期汇编语言}
+
+% 汇编代码高亮定义
+\lstdefinelanguage{asm}{%
+    morekeywords={.text,.globl,.type,.equ,.section,.def,.endef},
+    morekeywords={push,pop,mov,lea,add,sub,imul,imull,incl,shl,ret},
+    morekeywords={cmp,jmp,jge,jg,js,je,jne,jl},
+    morekeywords={movslq,movss,vmovdqu,vmovups,vpmulld,vpaddd,vpxor},
+    morekeywords={vextracti128,vpshufd,vphaddd,vmovd,cmovg,prefetcht0},
+    sensitive=true,
+    comment=[l]{\#},
+}[keywords,comments,strings]
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    columns=flexible,
+    keepspaces=true,
+    breaklines=true,
+    language=asm,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+}
+
+\begin{document}
+
+% ── 标题区域 ──────────────────────────────────────────────
+\begin{center}
+    {\LARGE \bf 汇编语言大作业4 \quad 实验报告} \\
+\end{center}
+\begin{kaishu}
+    小组成员：吴竞宸、黄奕皓、张晨轩、张诗炫 \hfill \quad 2026/06/20
+\end{kaishu}
+
+\section{概述}
+本次实验要求实现 $4096 \times 4096$ 整数矩阵乘法，并采用多种优化方法加速。我们实现了五种算法：
+\begin{enumerate}
+    \item Python 朴素矩阵乘法（作为性能参考基准）
+    \item C 语言朴素矩阵乘法（ikj 循环顺序 + 稀疏跳过）
+    \item 分块矩阵乘法（BS = 64，汇编核心）
+    \item SIMD AVX2 向量化矩阵乘法（B 矩阵转置 + AVX2 点积汇编）
+    \item OpenMP 多线程 + SIMD AVX2（四线程并行，B 转置后调用 AVX2 汇编核心）
+\end{enumerate}
+
+所有 C 版本的核心计算函数均采用 x86-64 AT\&T 语法手写汇编实现。项目沿用汇编大作业2的二进制数据流水线：\texttt{generate.c} 生成测试数据 $\rightarrow$ 计算程序读写 \texttt{.bin} 文件 $\rightarrow$ \texttt{check.c} 统一验证正确性。项目根目录提供 Makefile 一站式编译运行。
+
+\section{实验环境}
+\begin{itemize}
+    \item 宿主机：Windows 11，CPU Intel Core i9-14900HX (2.20 GHz)
+    \item 虚拟机：VMware Workstation，Ubuntu 24.04.3，分配 4 核 6 GB 内存
+    \item Python 环境：Windows 宿主 Python 3.x（仅 Python 版本在宿主机运行）
+    \item 编译器：GCC 11.4.0，编译选项 \texttt{-O2 -m64}（SIMD 版附加 \texttt{-mavx2}，OpenMP 版附加 \texttt{-fopenmp}）
+    \item 计时方式：\texttt{clock\_gettime(CLOCK\_MONOTONIC)} 获取实际墙钟时间
+    \item 矩阵规模：$4096 \times 4096$，元素为 \texttt{int} 类型（0--9 随机整数），每个矩阵约 64 MB
+\end{itemize}
+
+\section{实验结果}
+\subsection{性能数据}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ccc}\hline
+        算法 & 运行时间(s) & 加速比 \\ \hline
+        Python 朴素 & 3541.89 & — \\
+        C 朴素 & 29.50 & 1.00 \\
+        C 分块 & 33.89 & 0.87 \\
+        C SIMD AVX2 & 15.77 & 1.87 \\
+        C OpenMP + SIMD AVX2 & 4.50 & 6.56 \\ \hline
+    \end{tabular}
+    \caption{各算法运行时间与加速比}
+\end{table}
+
+\subsection{正确性验证}
+所有版本的输出均通过 \texttt{check.c} 验证，验证方式为：与 Python 参考实现的逐个元素比较（左上角 $8 \times 8$ 全检 + 随机 200 个位置抽样），全部通过。
+
+\section{算法分析}
+
+\subsection{Python 朴素版本}
+Python 版本使用三重循环 \texttt{i-k-j} 顺序，并在 $A[i][k] = 0$ 时跳过内层循环以利用测试数据的稀疏性（0--9 随机整数中约 10\% 为零）。但解释型语言的巨大开销使得 $4096 \times 4096$ 矩阵乘法耗时近一小时，仅作为正确性验证的基准参考，不具备实用价值。
+
+\subsection{C 朴素版本}
+C 朴素版本采用 \texttt{ikj} 循环顺序而非传统的 \texttt{ijk}。这种顺序的优点是：最内层循环访问 $B[k][j]$ 时 $k$ 固定不变，$j$ 连续递增，而 $B[k]$ 是一整行连续存放的数据，因此每次访存几乎必定命中 L1 缓存。同时，\texttt{aik} 在外层被提出，内层只做一次乘法和一次加法，减少了内存访问次数。$A[i][k] = 0$ 时的稀疏跳过进一步减少了约 10\% 的无效计算。最终耗时 29.50 s。
+
+\subsection{分块矩阵乘法（汇编核心）}
+分块乘法将 $4096 \times 4096$ 矩阵按 $64 \times 64$ 划分，外层 \texttt{ii-jj-kk} 循环遍历所有块，内层由汇编函数 \texttt{block\_kernel} 处理单个块。汇编核心采用 \texttt{k-j} 顺序：对每个 $k$，加载一行 $B[k][j_0 \ldots j_0+63]$，计算结果连续累加到 $C[i][j]$ 中。由于块足够小，$B[k]$ 的 64 个元素可以完全放在 L1 缓存中复用。
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{cl}
+        \hline
+        关键指令 & 说明 \\
+        \hline
+        \texttt{imulq \$(N*4), \%rax} & 计算行首偏移 $i \times 4096 \times 4$ 字节 \\
+        \texttt{lea (\%rsi,\%rax,1), \%rax} & 计算 $B[k]$ 行首地址 \\
+        \texttt{mov (\%rax,\%rbx,1), \%ecx} & 加载 $B[k][j]$（字节偏移寻址，消除乘法） \\
+        \texttt{imull \%r8d, \%ecx} & 标量乘法 $A[i][k] \times B[k][j]$ \\
+        \texttt{addl \%ecx, (\%r14,\%rbx,1)} & 累加到 $C[i][j]$ \\
+        \hline
+    \end{tabular}
+    \caption{block\_kernel.s 关键指令}
+\end{table}
+
+然而分块版本耗时 33.89 s，比 C 朴素版（29.50 s）更慢，加速比仅为 0.87。分析原因：\\
+(1) 汇编核心中 $B[k]$ 行首地址的计算使用了 \texttt{imulq}（64 位乘法），且每次循环都要重新计算；\\
+(2) 内层 j 循环使用字节偏移 \texttt{add \$4, \%ebx} 配合基址+索引寻址，虽然避免了 $j \times 4$ 的乘法，但每迭代只处理一个元素，未充分利用指令级并行；\\
+(3) 分块本身产生的额外外层循环开销（$64^3 = 262144$ 次 \texttt{block\_kernel} 调用）抵消了缓存局部性的收益。
+
+\subsection{SIMD AVX2 向量化（汇编核心）}
+该版本先对矩阵 B 做一次转置得到 BT，此后对每个元素对 $(i,j)$，计算 A 的行 $A[i][\ast]$ 与 BT 的行 $BT[j][\ast]$（即原 B 的列）的点积。由于两行都连续存放，访存模式完全顺序，缓存利用率最优。
+
+汇编函数 \texttt{simd\_dot} 一次处理 8 个 32 位整数。先将 B 转置为 BT（C 语言循环实现），然后 C 端双重循环遍历所有 $(i,j)$，每个 $(i,j)$ 调用 \texttt{simd\_dot} 计算完整点积。
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{cl}
+        \hline
+        关键指令 & 说明 \\
+        \hline
+        \texttt{vmovdqu (\%rdi,\%rax,4), \%ymm1} & 从 $A[i]$ 加载 8 个 int（256 位）到 ymm 寄存器 \\
+        \texttt{vmovdqu (\%rsi,\%rax,4), \%ymm2} & 从 $BT[j]$ 加载 8 个 int 到 ymm 寄存器 \\
+        \texttt{vpmulld \%ymm2, \%ymm1, \%ymm3} & 8 对 int 并行乘法（单条指令完成 8 次乘法） \\
+        \texttt{vpaddd \%ymm3, \%ymm0, \%ymm0} & 8 对 int 并行加法，累加到向量累加器 \\
+        \texttt{vextracti128 \$1, \%ymm0, \%xmm1} & 将 256 位 ymm 的高 128 位提取到 xmm \\
+        \texttt{vphaddd \%xmm0, \%xmm0, \%xmm0} & 水平成对加法，规约 8 个 lane 到 1 个标量 \\
+        \hline
+    \end{tabular}
+    \caption{simd\_dot.s 关键 AVX2 指令}
+\end{table}
+
+该版本耗时 15.77 s，加速比 1.87。AVX2 单条指令替代 8 次标量乘法/加法，理论上可获得 8 倍加速。但实际加速比受到三个因素制约：B 矩阵转置的开销（遍历 $4096^2$ 个元素并写回）、调用 \texttt{simd\_dot} 时 $4096^2$ 次函数调用开销、以及水平归约（vextracti128 + vpshufd + vphaddd）需要多条指令完成。
+
+\subsection{OpenMP + SIMD AVX2}
+在 SIMD AVX2 的基础上，将外层 i 循环用 \texttt{\#pragma omp parallel for} 并行化。B 矩阵事先统一转置（串行，仅执行一次），随后四个线程各负责一部分行的计算，每个线程内部仍调用 AVX2 汇编核心 \texttt{simd\_dot}。
+
+该版本耗时 4.50 s，加速比达到 6.56。这一结果同时体现了线程级并行（利用多核 CPU）和指令级并行（AVX2 单指令多数据）的收益。OpenMP 调度策略为 \texttt{schedule(static)}，确保各线程负载均衡。
+
+\section{总结}
+本次实验从 Python 朴素实现出发，逐步引入 ikj 循环重排、分块缓存优化、AVX2 向量指令、以及 OpenMP 多线程并行，将 $4096 \times 4096$ 整数矩阵乘法的运行时间从约 59 分钟（Python）压缩至 4.5 秒（OpenMP + SIMD），总体加速约 787 倍。汇编核心函数的编写使我们深入理解了 x86-64 指令集、SIMD 向量化编程和缓存优化技术。
+
+\end{document}
